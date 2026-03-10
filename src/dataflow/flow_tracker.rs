@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use crate::analyzer::taint::{is_test_file, is_false_taint_source};
 
 /// Flow Tracker - CodeQL/Semgrep-inspired inter-procedural data flow analysis
 /// Tracks data flow across assignments, function calls, and returns
@@ -168,11 +169,17 @@ impl FlowTracker {
         let mut paths = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
         let mut flow_id = 0;
+        let in_test = is_test_file(file_path);
 
         // Phase 1: Find all taint sources
         let mut tainted: Vec<(String, usize, String, String)> = Vec::new();
 
         for (i, line) in lines.iter().enumerate() {
+            // Skip false taint sources (literals, test fixtures, dict ops)
+            if is_false_taint_source(line, &lines, i) {
+                continue;
+            }
+
             for source in &self.sources {
                 if !source.languages.contains(&ext) { continue; }
                 if let Some(caps) = source.pattern.captures(line) {
@@ -225,6 +232,19 @@ impl FlowTracker {
                 if !sink.languages.contains(&ext) { continue; }
                 if !sink.pattern.is_match(line) { continue; }
 
+                // Suppress: subprocess with shell=False + list arg is safe
+                if sink.sink_type == "command_execution" {
+                    let l = line.to_lowercase();
+                    if (l.contains("shell=false") || l.contains("shell = false"))
+                        && (l.contains("subprocess.run([") || l.contains("subprocess.popen([")
+                            || l.contains("subprocess.call([") || l.contains("subprocess.check_output([")) {
+                        continue;
+                    }
+                    if l.contains(".keys()") || l.contains(".values()") || l.contains(".items()") {
+                        continue;
+                    }
+                }
+
                 // Check direct tainted vars
                 for (tvar, tline, tsrc_content, tsource) in &tainted {
                     if line.contains(tvar.as_str()) && i + 1 > *tline {
@@ -264,10 +284,20 @@ impl FlowTracker {
 
                         let confidence = if is_sanitized {
                             FlowConfidence::Low
+                        } else if in_test {
+                            FlowConfidence::Low
                         } else if (i + 1).saturating_sub(*tline) < 15 {
                             FlowConfidence::High
                         } else {
                             FlowConfidence::Medium
+                        };
+
+                        let severity_str = if is_sanitized {
+                            "LOW"
+                        } else if in_test {
+                            "INFO"
+                        } else {
+                            sink.severity
                         };
 
                         flow_id += 1;
@@ -283,7 +313,7 @@ impl FlowTracker {
                             intermediate_steps: steps,
                             is_sanitized,
                             confidence,
-                            severity: if is_sanitized { "LOW".to_string() } else { sink.severity.to_string() },
+                            severity: severity_str.to_string(),
                             cwe: sink.cwe.to_string(),
                             description: format!(
                                 "Data flows from {} (line {}) to {} (line {}){}",
@@ -335,10 +365,20 @@ impl FlowTracker {
 
                         let confidence = if is_sanitized {
                             FlowConfidence::Low
+                        } else if in_test {
+                            FlowConfidence::Low
                         } else if (i + 1).saturating_sub(source_line) < 20 {
                             FlowConfidence::High
                         } else {
                             FlowConfidence::Medium
+                        };
+
+                        let severity_str = if is_sanitized {
+                            "LOW"
+                        } else if in_test {
+                            "INFO"
+                        } else {
+                            sink.severity
                         };
 
                         flow_id += 1;
@@ -354,7 +394,7 @@ impl FlowTracker {
                             intermediate_steps: steps,
                             is_sanitized,
                             confidence,
-                            severity: if is_sanitized { "LOW".to_string() } else { sink.severity.to_string() },
+                            severity: severity_str.to_string(),
                             cwe: sink.cwe.to_string(),
                             description: format!(
                                 "Propagated taint: {} → {} → {} sink (lines {} → {} → {}){}",
@@ -379,11 +419,23 @@ impl FlowTracker {
         for line_idx in start..end {
             let line = lines[line_idx];
             if !line.contains(variable) { continue; }
+
+            // Check registered sanitizer patterns
             for sanitizer in &self.sanitizers {
                 if !sanitizer.languages.contains(&ext) { continue; }
                 if sanitizer.pattern.is_match(line) {
                     return true;
                 }
+            }
+
+            // Inter-function validation: recognize validate_*, check_*, verify_*,
+            // ensure_*, assert_*, is_valid_*, sanitize_*, clean_*, filter_* calls
+            // that take the tainted variable as argument
+            let validate_re = Regex::new(
+                r"(?i)(?:validate|check|verify|ensure|assert|is_valid|sanitize|clean|filter|normalize|escape|encode|whitelist|allowlist|safeguard|guard)_?\w*\s*\("
+            ).unwrap();
+            if validate_re.is_match(line) {
+                return true;
             }
         }
         false

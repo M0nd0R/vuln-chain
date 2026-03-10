@@ -38,7 +38,7 @@ fn scope_regexes() -> &'static ScopeRegexes {
             ("hpp", r"(?:\w+\s+)+(\w+)\s*\([^)]*\)\s*\{"),
         ];
         for &(ext, pat) in funcs {
-            func_res.insert(ext, Regex::new(pat).unwrap());
+            func_res.insert(ext, Regex::new(pat).expect("invalid func regex pattern"));
         }
         let default_func = Regex::new(r"(?:function|def|fn|func)\s+(\w+)").unwrap();
         func_res.insert("__default__", default_func);

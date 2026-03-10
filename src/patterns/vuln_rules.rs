@@ -109,6 +109,7 @@ pub struct Finding {
     pub context_before: Vec<String>,
     pub context_after: Vec<String>,
     pub fingerprint: String,
+    pub confidence: String,
 }
 
 pub struct CompiledRule {

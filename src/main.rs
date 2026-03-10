@@ -57,6 +57,11 @@ struct Args {
     /// Disable IaC/config security scanning
     #[arg(long, default_value_t = false)]
     no_iac: bool,
+
+    /// Include test files in scan results (default: excluded)
+    /// Test directories: _tests/, tests/, test/, __tests__/, spec/, fixtures/
+    #[arg(long, default_value_t = false)]
+    include_tests: bool,
 }
 
 fn main() {
@@ -111,7 +116,7 @@ fn main() {
     eprintln!("[*] Initializing scan engines...");
     let engine = ScanEngine::new();
     eprintln!("[*] Engines ready in {:.2}s", start.elapsed().as_secs_f64());
-    let mut result = engine.scan(&target);
+    let mut result = engine.scan(&target, args.include_tests);
 
     let elapsed = start.elapsed();
     eprintln!("[+] Scan completed in {:.2}s", elapsed.as_secs_f64());

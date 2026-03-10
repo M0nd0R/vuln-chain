@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use crate::analyzer::taint::is_test_file;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretFinding {
@@ -30,7 +31,7 @@ pub fn build_secret_rules() -> Vec<SecretRule> {
         },
         SecretRule {
             name: "AWS Secret Key",
-            pattern: Regex::new(r#"(?i)(?:aws)?_?(?:secret)?_?(?:access)?_?key["\s:=]+[A-Za-z0-9/+=]{40}"#).unwrap(),
+            pattern: Regex::new(r#"(?i)(?:aws_?secret_?access_?key|aws_?secret_?key)\s*["'\s:=]+\s*[A-Za-z0-9/+=]{40}"#).unwrap(),
             severity: "CRITICAL",
             description: "AWS Secret Access Key — full AWS account compromise",
         },
@@ -219,15 +220,52 @@ pub fn scan_for_secrets(file_path: &str, content: &str, rules: &[SecretRule]) ->
         return findings;
     }
 
+    let in_test = is_test_file(file_path);
+
+    // Detect crypto-related context in file (imports that suggest hex test vectors)
+    let has_crypto_context = content.contains("hashlib") || content.contains("chia_bls")
+        || content.contains("sha256") || content.contains("SHA256")
+        || content.contains("from_bytes") || content.contains("G1Element")
+        || content.contains("G2Element") || content.contains("AugSchemeMPL")
+        || content.contains("digest") || content.contains("hmac")
+        || content.contains("use sha2") || content.contains("use blake2");
+
     for (i, line) in lines.iter().enumerate() {
         // Skip comments that are just documentation examples
         let trimmed = line.trim();
         if trimmed.starts_with("//") && trimmed.contains("example") {
             continue;
         }
+        // Skip comment-only lines
+        if trimmed.starts_with('#') && !trimmed.starts_with("#!") {
+            // Allow .env-style KEY=value but skip Python comments
+            if !trimmed.contains('=') {
+                continue;
+            }
+        }
 
         for rule in rules {
             if let Some(m) = rule.pattern.find(line) {
+                // Context-aware suppression for AWS Secret Key false positives
+                if rule.name == "AWS Secret Key" || rule.name == "Generic API Key"
+                    || rule.name == "Generic Secret/Token" {
+                    let matched = m.as_str();
+                    // Pure hex strings in crypto context are likely test vectors, not secrets
+                    if has_crypto_context {
+                        let value_part = matched.split(&['=', ':', '"', '\''][..]).last().unwrap_or("");
+                        let value_trimmed = value_part.trim().trim_matches('"').trim_matches('\'');
+                        // If the "secret" is all hex chars, it's likely a hash/BLS key, not an AWS secret
+                        if value_trimmed.len() >= 32 && value_trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                            continue;
+                        }
+                    }
+                }
+
+                // Suppress Heroku UUID rule in test files (too noisy)
+                if rule.name == "Heroku API Key" && in_test {
+                    continue;
+                }
+
                 // Redact the matched text for safety
                 let matched = m.as_str();
                 let redacted = {
@@ -241,13 +279,22 @@ pub fn scan_for_secrets(file_path: &str, content: &str, rules: &[SecretRule]) ->
                     }
                 };
 
+                // Downgrade severity for test files
+                let effective_severity = if in_test && rule.severity == "CRITICAL" {
+                    "MEDIUM"
+                } else if in_test && rule.severity == "HIGH" {
+                    "LOW"
+                } else {
+                    rule.severity
+                };
+
                 findings.push(SecretFinding {
                     rule_name: rule.name.to_string(),
                     file_path: file_path.to_string(),
                     line_number: i + 1,
                     line_content: redact_line(line),
                     matched_text: redacted,
-                    severity: rule.severity.to_string(),
+                    severity: effective_severity.to_string(),
                     description: rule.description.to_string(),
                 });
             }

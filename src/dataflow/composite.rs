@@ -141,7 +141,18 @@ fn evaluate_condition(cond: &CompiledCondition, line: &str, all_lines: &[&str], 
         CompiledCondition::Pattern(re) => re.is_match(line),
         CompiledCondition::And(conds) => conds.iter().all(|c| evaluate_condition(c, line, all_lines, line_idx)),
         CompiledCondition::Or(conds) => conds.iter().any(|c| evaluate_condition(c, line, all_lines, line_idx)),
-        CompiledCondition::Not(c) => !evaluate_condition(c, line, all_lines, line_idx),
+        CompiledCondition::Not(c) => {
+            // Enhanced NOT: check the current line AND ±10 lines for the pattern
+            // This catches sanitizers/validators near the flagged line
+            let window_start = line_idx.saturating_sub(10);
+            let window_end = (line_idx + 11).min(all_lines.len());
+            for idx in window_start..window_end {
+                if evaluate_condition(c, all_lines[idx], all_lines, idx) {
+                    return false; // Pattern found in window — NOT condition fails
+                }
+            }
+            true
+        }
         CompiledCondition::Inside(re) => {
             // Check if any preceding line matches the "inside" context
             for i in (0..line_idx).rev() {
@@ -355,7 +366,7 @@ fn build_composite_rules() -> Vec<CompositeRule> {
             languages: vec!["py".into(), "js".into(), "ts".into()],
             condition: RuleCondition::And(vec![
                 RuleCondition::Pattern(r"(?i)(?:open|readFile|writeFile|createReadStream|readFileSync)\s*\(.*(?:req\.|request\.|param|user|input|filename)".into()),
-                RuleCondition::Not(Box::new(RuleCondition::Pattern(r"(?i)(?:realpath|resolve|basename|safe_join|secure_filename|canonicalize|normalize)".into()))),
+                RuleCondition::Not(Box::new(RuleCondition::Pattern(r"(?i)(?:realpath|resolve|basename|safe_join|secure_filename|canonicalize|normalize|commonpath|commonprefix|abspath|startswith\s*\(|pathlib\.Path|\.resolve\(\)|os\.path\.)".into()))),
             ]),
             remediation: "Validate path with realpath/resolve and ensure it stays within allowed directory".into(),
             category: "PathTraversal".into(), confidence: "HIGH".into(),

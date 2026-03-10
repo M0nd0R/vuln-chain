@@ -51,6 +51,8 @@ pub static SOURCE_EXTENSIONS: &[&str] = &[
     "tf", "hcl",
     // SQL
     "sql",
+    // Solidity / Smart Contracts
+    "sol",
 ];
 
 pub static DEPENDENCY_FILES: &[&str] = &[

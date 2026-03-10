@@ -473,14 +473,14 @@ pub static C_RULES: &[VulnRule] = &[
     VulnRule {
         id: "C-UAF-001",
         name: "Potential Use-After-Free",
-        description: "Pointer used after free without nullification",
+        description: "Pointer potentially used after free — verify pointer is not accessed after this free()",
         category: VulnCategory::UseAfterFree,
-        severity: Severity::Critical,
-        pattern: r#"free\s*\(\s*\w+\s*\)\s*;"#,
+        severity: Severity::Medium,
+        pattern: r#"free\s*\(\s*(\w+)\s*\)\s*;"#,
         languages: &["c", "cpp", "h", "hpp", "cc", "cxx"],
         cwe: "CWE-416",
         remediation: "Set pointer to NULL after free: free(ptr); ptr = NULL;",
-        false_positive_hint: "Check if pointer is used after this free",
+        false_positive_hint: "Only a true UAF if the pointer is read/written AFTER the free(). If free() is the last use or ptr is set to NULL immediately after, this is safe.",
     },
     VulnRule {
         id: "C-CMD-001",
@@ -904,6 +904,82 @@ pub static MOBILE_RULES: &[VulnRule] = &[
     },
 ];
 
+// ========================== SOLIDITY / SMART CONTRACTS ==========================
+pub static SOLIDITY_RULES: &[VulnRule] = &[
+    VulnRule {
+        id: "SOL-REENT-001",
+        name: "Reentrancy Vulnerability",
+        description: "External call before state update — classic reentrancy attack vector",
+        category: VulnCategory::RaceCondition,
+        severity: Severity::Critical,
+        pattern: r#"\.call\{.*value"#,
+        languages: &["sol"],
+        cwe: "CWE-841",
+        remediation: "Use checks-effects-interactions pattern or ReentrancyGuard. Update state variables before external calls.",
+        false_positive_hint: "Check if nonReentrant modifier or state update before call",
+    },
+    VulnRule {
+        id: "SOL-ARITH-001",
+        name: "Unchecked Arithmetic (pre-0.8)",
+        description: "Arithmetic operation without SafeMath in Solidity < 0.8",
+        category: VulnCategory::IntegerOverflow,
+        severity: Severity::High,
+        pattern: r#"(?:unchecked\s*\{|pragma\s+solidity\s+(?:0\.[4-7]|\^0\.[4-7]))"#,
+        languages: &["sol"],
+        cwe: "CWE-190",
+        remediation: "Use Solidity >= 0.8 with built-in overflow checks, or use OpenZeppelin SafeMath",
+        false_positive_hint: "Check if using SafeMath or Solidity >= 0.8",
+    },
+    VulnRule {
+        id: "SOL-AUTH-001",
+        name: "tx.origin Authentication",
+        description: "Using tx.origin for authorization is vulnerable to phishing attacks",
+        category: VulnCategory::BrokenAuth,
+        severity: Severity::High,
+        pattern: r#"tx\.origin"#,
+        languages: &["sol"],
+        cwe: "CWE-284",
+        remediation: "Use msg.sender instead of tx.origin for authentication",
+        false_positive_hint: "Check if tx.origin is used for auth vs logging",
+    },
+    VulnRule {
+        id: "SOL-DELEG-001",
+        name: "Delegatecall to User-Controlled Address",
+        description: "delegatecall to a variable address allows arbitrary code execution in caller context",
+        category: VulnCategory::Injection,
+        severity: Severity::Critical,
+        pattern: r#"\.delegatecall\("#,
+        languages: &["sol"],
+        cwe: "CWE-94",
+        remediation: "Only delegatecall to trusted, hardcoded contract addresses",
+        false_positive_hint: "Check if delegatecall target is a constant",
+    },
+    VulnRule {
+        id: "SOL-DESTR-001",
+        name: "Unprotected Selfdestruct",
+        description: "selfdestruct without access control allows anyone to destroy the contract",
+        category: VulnCategory::PrivilegeEscalation,
+        severity: Severity::Critical,
+        pattern: r#"selfdestruct\s*\("#,
+        languages: &["sol"],
+        cwe: "CWE-284",
+        remediation: "Add onlyOwner or similar access control to selfdestruct",
+        false_positive_hint: "Check if function has access control modifier",
+    },
+    VulnRule {
+        id: "SOL-FRONT-001",
+        name: "Front-Running Vulnerable Pattern",
+        description: "State-dependent operation without commit-reveal or time-lock protection",
+        category: VulnCategory::RaceCondition,
+        severity: Severity::Medium,
+        pattern: r#"block\.(?:timestamp|number|difficulty|coinbase)"#,
+        languages: &["sol"],
+        cwe: "CWE-362",
+        remediation: "Use commit-reveal scheme or block hash for randomness; avoid block.timestamp for critical logic",
+        false_positive_hint: "Check if used for non-critical timing",
+    },
+];
+
 pub fn all_rules() -> Vec<&'static VulnRule> {
     let mut rules: Vec<&'static VulnRule> = Vec::new();
     for r in PYTHON_RULES { rules.push(r); }
@@ -916,6 +992,7 @@ pub fn all_rules() -> Vec<&'static VulnRule> {
     for r in RUST_RULES { rules.push(r); }
     for r in CSHARP_RULES { rules.push(r); }
     for r in MOBILE_RULES { rules.push(r); }
+    for r in SOLIDITY_RULES { rules.push(r); }
     // Extended rules (Semgrep-inspired patterns)
     rules.extend(crate::patterns::language_extended::all_extended_rules());
     rules

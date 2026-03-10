@@ -113,7 +113,7 @@ impl DependencyScanner {
 
         let risky_patterns = vec![
             RiskyDep {
-                pattern: Regex::new(r#"(?i)(?:telnet|ftp[^s]|rsh|rlogin|rexec)"#).unwrap(),
+                pattern: Regex::new(r#"(?i)(?:^|["'\s])(?:telnet|ftp|rsh|rlogin|rexec)://"#).unwrap(),
                 description: "Insecure protocol dependency (plaintext communication)",
                 severity: "HIGH",
             },

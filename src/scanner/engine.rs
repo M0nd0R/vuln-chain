@@ -13,7 +13,7 @@ use crate::patterns::vuln_rules::{compile_rules, Finding, CompiledRule};
 use crate::scanner::file_collector::{FileCollector, FileType};
 use crate::scanner::secrets::{self, SecretFinding};
 use crate::scanner::iac::{IacScanner, IacFinding};
-use crate::analyzer::taint::{TaintAnalyzer, TaintFinding};
+use crate::analyzer::taint::{TaintAnalyzer, TaintFinding, is_test_file};
 use crate::analyzer::chain::{ChainAnalyzer, VulnChain};
 use crate::dataflow::flow_tracker::{FlowTracker, FlowPath};
 use crate::dataflow::composite::{CompositeEngine, CompositeFinding};
@@ -90,7 +90,7 @@ impl ScanEngine {
         }
     }
 
-    pub fn scan(&self, target_path: &Path) -> ScanResult {
+    pub fn scan(&self, target_path: &Path, include_tests: bool) -> ScanResult {
         let collector = FileCollector::new();
         let files = collector.collect(target_path);
         let total_files = files.len();
@@ -103,6 +103,18 @@ impl ScanEngine {
         // Partition files by type
         let (source_files, other_files): (Vec<_>, Vec<_>) =
             files.into_iter().partition(|f| f.file_type == FileType::Source);
+
+        // Filter out test files if --include-tests is not set
+        let source_files: Vec<_> = if include_tests {
+            source_files
+        } else {
+            let (prod, test): (Vec<_>, Vec<_>) = source_files.into_iter()
+                .partition(|f| !is_test_file(&f.path.to_string_lossy()));
+            if !test.is_empty() {
+                eprintln!("[*] Excluding {} test files (use --include-tests to scan them)", test.len());
+            }
+            prod
+        };
 
         let (dep_files, config_files): (Vec<_>, Vec<_>) =
             other_files.into_iter().partition(|f| f.file_type == FileType::Dependency);
@@ -228,11 +240,21 @@ impl ScanEngine {
         let before_secrets = all_secrets.len();
         dedup_findings(&mut all_findings);
         dedup_secrets(&mut all_secrets);
+
+        // Cross-engine dedup: if a composite finding covers the same file:line as a
+        // basic pattern finding, remove the basic one (composite is more specific)
+        let composite_locations: std::collections::HashSet<String> = all_composite.iter()
+            .map(|cf| format!("{}:{}", cf.file_path, cf.line_number))
+            .collect();
+        let before_cross = all_findings.len();
+        all_findings.retain(|f| !composite_locations.contains(&format!("{}:{}", f.file_path, f.line_number)));
+        let cross_deduped = before_cross - all_findings.len();
+
         let deduped_findings = before_findings - all_findings.len();
         let deduped_secrets = before_secrets - all_secrets.len();
         if deduped_findings + deduped_secrets > 0 {
-            eprintln!("  [*] Removed {} duplicate findings, {} duplicate secrets",
-                deduped_findings, deduped_secrets);
+            eprintln!("  [*] Removed {} duplicate findings ({} cross-engine), {} duplicate secrets",
+                deduped_findings, cross_deduped, deduped_secrets);
         }
 
         // Sort by severity
@@ -280,6 +302,18 @@ impl ScanEngine {
             }
             for (i, line) in lines.iter().enumerate() {
                 if let Some(m) = compiled.regex.find(line) {
+                    // UAF post-free scope check: only flag if pointer is used after free()
+                    if compiled.rule.id == "C-UAF-001" {
+                        if let Some(caps) = compiled.regex.captures(line) {
+                            if let Some(ptr_match) = caps.get(1) {
+                                let ptr_name = ptr_match.as_str();
+                                if !is_used_after_free(&lines, i, ptr_name) {
+                                    continue; // free() is the last use — not UAF
+                                }
+                            }
+                        }
+                    }
+
                     let mut hasher = Sha256::new();
                     hasher.update(format!("{}:{}:{}", compiled.rule.id, path_str, i + 1));
                     let hash = hex::encode(hasher.finalize());
@@ -304,6 +338,11 @@ impl ScanEngine {
                         context_before,
                         context_after,
                         fingerprint: hash,
+                        confidence: if crate::analyzer::taint::is_test_file(&path_str) {
+                            "LOW".to_string()
+                        } else {
+                            "HIGH".to_string()
+                        },
                     });
                 }
             }
@@ -341,4 +380,42 @@ fn dedup_secrets(secrets: &mut Vec<SecretFinding>) {
         let key = format!("{}:{}:{}", s.rule_name, s.file_path, s.line_number);
         seen.insert(key)
     });
+}
+
+/// Check if a pointer is actually read/written AFTER the free() call in the same scope.
+/// Returns true if the pointer is used after free (real UAF), false if free is safe (last use).
+fn is_used_after_free(lines: &[&str], free_line_idx: usize, ptr_name: &str) -> bool {
+    let free_indent = {
+        let line = lines[free_line_idx];
+        line.len() - line.trim_start().len()
+    };
+
+    // Scan forward from the free() line
+    for j in (free_line_idx + 1)..lines.len() {
+        let line = lines[j];
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        let indent = line.len() - trimmed.len();
+
+        // If we hit a closing brace or function/scope boundary at same or lesser indent, stop
+        if indent <= free_indent && (trimmed == "}" || trimmed.starts_with("return") || trimmed.starts_with("void ")
+            || trimmed.starts_with("int ") || trimmed.starts_with("static ")
+            || trimmed.starts_with("char ") || trimmed.starts_with("struct ")) {
+            break;
+        }
+
+        // Check if pointer is set to NULL immediately — safe pattern
+        if trimmed.contains(ptr_name) && (trimmed.contains("= NULL") || trimmed.contains("= nullptr") || trimmed.contains("= 0")) {
+            return false; // ptr is nullified — not UAF
+        }
+
+        // Check if pointer is used (read/write) after free
+        if trimmed.contains(ptr_name) && !trimmed.starts_with("//") && !trimmed.starts_with("/*") {
+            // Pointer appears on a subsequent line — potential UAF
+            return true;
+        }
+    }
+
+    false // free() is the last statement for this pointer — not UAF
 }

@@ -88,6 +88,34 @@ impl SanitizerDB {
                     protects_against: &["BruteForce", "DoS"],
                     languages: &["py","js","ts","java","rb","go"],
                 },
+                // Log injection sanitizers
+                SanitizerEntry {
+                    pattern: Regex::new(r#"(?i)(?:log\.escape|strip_ansi|sanitize_log|replace\s*\(\s*["']\\n|replace\s*\(\s*["']\\r)"#).unwrap(),
+                    category: "log_sanitizer",
+                    protects_against: &["LogInjection", "log_injection"],
+                    languages: &["py","js","ts","java","go","rb","cs"],
+                },
+                // Regex DoS prevention
+                SanitizerEntry {
+                    pattern: Regex::new(r"(?i)(?:re2|google/re2|regex_timeout|re\.compile.*timeout|PCRE2_MATCH_LIMIT|SafeRegex|anchored_regex)").unwrap(),
+                    category: "regex_dos_prevention",
+                    protects_against: &["RegexDoS"],
+                    languages: &["py","js","ts","java","go","rs","rb"],
+                },
+                // Content-Type / MIME validation
+                SanitizerEntry {
+                    pattern: Regex::new(r"(?i)(?:content.?type\s*[!=]=|mime.?type|file.?type|magic\.from_buffer|python-magic|file-type|allowed_extensions|ALLOWED_EXTENSIONS|accept=)").unwrap(),
+                    category: "file_type_validation",
+                    protects_against: &["FileUpload", "file_operation"],
+                    languages: &["py","js","ts","java","rb","php","go","cs"],
+                },
+                // Integer/boundary validation
+                SanitizerEntry {
+                    pattern: Regex::new(r"(?i)(?:max_length|min_length|maxlength|minlength|MaxValue|MinValue|Range\(|between\(|clamp\(|bounded|limit|MAX_SIZE|validate_range)").unwrap(),
+                    category: "boundary_validation",
+                    protects_against: &["IntegerOverflow", "BufferOverflow"],
+                    languages: &["py","js","ts","java","go","rs","cs","c","cpp","rb"],
+                },
             ],
         }
     }

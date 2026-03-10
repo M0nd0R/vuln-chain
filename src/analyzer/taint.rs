@@ -44,6 +44,66 @@ struct SinkPattern {
     severity: &'static str,
 }
 
+/// Check if a file path is in a test directory or is a test file
+pub fn is_test_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("/_tests/") || lower.contains("/tests/") || lower.contains("/test/")
+        || lower.contains("/__tests__/") || lower.contains("/spec/") || lower.contains("/fixtures/")
+        || lower.contains("/test-") || lower.contains("/testing/")
+        || lower.ends_with("_test.py") || lower.ends_with("_test.go") || lower.ends_with("_test.rs")
+        || lower.contains("/test_") || lower.ends_with("_spec.rb") || lower.ends_with("_spec.js")
+        || lower.ends_with(".test.js") || lower.ends_with(".test.ts") || lower.ends_with(".spec.ts")
+}
+
+/// Check if a source line is actually a hardcoded constant/literal, not real user input.
+/// Returns true if the "source" should be suppressed (it's not real taint).
+pub fn is_false_taint_source(line: &str, lines: &[&str], line_idx: usize) -> bool {
+    let trimmed = line.trim();
+
+    // @pytest.mark.parametrize hardcoded test values — NOT user input
+    if trimmed.starts_with("@pytest.mark.parametrize") || trimmed.starts_with("@parametrize") {
+        return true;
+    }
+    // Check if preceding lines have @pytest.mark.parametrize (decorator may be above)
+    if line_idx > 0 {
+        for back in (line_idx.saturating_sub(3)..line_idx).rev() {
+            let prev = lines[back].trim();
+            if prev.starts_with("@pytest.mark.parametrize") || prev.starts_with("@parametrize")
+                || prev.starts_with("@pytest.fixture") {
+                return true;
+            }
+            if !prev.is_empty() && !prev.ends_with(',') && !prev.ends_with('(') && !prev.ends_with('\\') {
+                break;
+            }
+        }
+    }
+
+    // Variable assigned from a string literal, number, list literal, dict literal, or constant
+    let rhs_patterns = [
+        r#"=\s*["'][^"']*["']\s*$"#,        // assigned from string literal
+        r#"=\s*\d+\.?\d*\s*$"#,              // assigned from number literal
+        r#"=\s*\[.*\]\s*$"#,                 // assigned from list literal
+        r#"=\s*\{.*\}\s*$"#,                 // assigned from dict literal
+        r#"=\s*(?:True|False|None)\s*$"#,    // assigned from boolean/None
+        r#"=\s*b["'][^"']*["']\s*$"#,        // assigned from bytes literal
+    ];
+
+    for pat in &rhs_patterns {
+        if let Ok(re) = Regex::new(pat) {
+            if re.is_match(trimmed) {
+                return true;
+            }
+        }
+    }
+
+    // dict .keys() / .values() / .items() iteration — not user input
+    if trimmed.contains(".keys()") || trimmed.contains(".values()") || trimmed.contains(".items()") {
+        return true;
+    }
+
+    false
+}
+
 pub struct TaintAnalyzer {
     sources: Vec<SourcePattern>,
     sinks: Vec<SinkPattern>,
@@ -177,11 +237,17 @@ impl TaintAnalyzer {
     pub fn analyze(&self, file_path: &str, content: &str, ext: &str) -> Vec<TaintFinding> {
         let mut findings = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
+        let in_test_file = is_test_file(file_path);
 
         // Phase 1: Find all taint sources in this file
         let mut tainted_vars: Vec<(String, usize, String, String)> = Vec::new(); // (var_name, line_num, line_content, source_type)
 
         for (i, line) in lines.iter().enumerate() {
+            // Skip false taint sources: literals, test decorators, dict operations
+            if is_false_taint_source(line, &lines, i) {
+                continue;
+            }
+
             for source in &self.sources {
                 if !source.languages.contains(&ext) {
                     continue;
@@ -210,6 +276,20 @@ impl TaintAnalyzer {
                     continue;
                 }
                 if sink.pattern.is_match(line) {
+                    // Suppress: subprocess with shell=False + list arg is safe
+                    if sink.sink_type == "command_execution" {
+                        let l = line.to_lowercase();
+                        if (l.contains("shell=false") || l.contains("shell = false"))
+                            && (l.contains("subprocess.run([") || l.contains("subprocess.popen([")
+                                || l.contains("subprocess.call([") || l.contains("subprocess.check_output([")) {
+                            continue;
+                        }
+                        // dict .keys() iteration is not command execution
+                        if l.contains(".keys()") || l.contains(".values()") || l.contains(".items()") {
+                            continue;
+                        }
+                    }
+
                     // Check if any tainted variable flows to this sink
                     for (var_name, src_line, src_content, src_type) in &tainted_vars {
                         // The sink must be AFTER the source, and the variable must appear in the sink line
@@ -229,7 +309,8 @@ impl TaintAnalyzer {
 
                             // Check if the sink is inside a test function — lower confidence
                             let scope = ScopeAnalyzer::analyze_scope(&lines, i + 1, ext);
-                            let confidence = if scope.is_in_test {
+                            let in_test = scope.is_in_test || in_test_file;
+                            let confidence = if in_test {
                                 "LOW"
                             } else if is_sanitized {
                                 "LOW"
@@ -241,6 +322,8 @@ impl TaintAnalyzer {
 
                             let severity = if is_sanitized {
                                 "LOW" // Downgrade sanitized flows
+                            } else if in_test {
+                                "INFO" // Test code is informational only
                             } else {
                                 sink.severity
                             };
