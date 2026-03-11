@@ -109,9 +109,9 @@ pub fn build_secret_rules() -> Vec<SecretRule> {
         },
         SecretRule {
             name: "Heroku API Key",
-            pattern: Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").unwrap(),
+            pattern: Regex::new(r#"(?i)(?:heroku|HEROKU)[_\s]*(?:api[_\s]*)?(?:key|token)\s*[:=]\s*['"]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"#).unwrap(),
             severity: "LOW",
-            description: "Possible UUID/Heroku key (needs context verification)",
+            description: "Possible Heroku API key (needs context verification)",
         },
         SecretRule {
             name: "Firebase URL",
@@ -122,7 +122,7 @@ pub fn build_secret_rules() -> Vec<SecretRule> {
         // Generic Secrets
         SecretRule {
             name: "Generic Password in Code",
-            pattern: Regex::new(r#"(?i)(?:password|passwd|pwd|pass)\s*[:=]\s*["'][^"']{8,}["']"#).unwrap(),
+            pattern: Regex::new(r#"(?i)(?:password|passwd|pass)\s*[:=]\s*["'][^"']{8,}["']"#).unwrap(),
             severity: "HIGH",
             description: "Hardcoded password in source code",
         },
@@ -258,6 +258,59 @@ pub fn scan_for_secrets(file_path: &str, content: &str, rules: &[SecretRule]) ->
                         if value_trimmed.len() >= 32 && value_trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
                             continue;
                         }
+                    }
+                    // Suppress enum/constant patterns: INVALID_ACCESS_TOKEN = "INVALID_ACCESS_TOKEN"
+                    // Value is ALL_CAPS_UNDERSCORES → it's a constant name, not a real secret.
+                    // Seen in TypeScript enums (e.g. Plaid SDK Types.ts), Rust consts, Go const blocks.
+                    if rule.name == "Generic Secret/Token" || rule.name == "Generic API Key" {
+                        let value_part = matched.split(&['"', '\''][..]).nth(1).unwrap_or("");
+                        let is_enum_constant = !value_part.is_empty()
+                            && value_part.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                            && value_part.len() <= 64;
+                        if is_enum_constant {
+                            continue;
+                        }
+                        // Also suppress obvious placeholder/test token values
+                        let lower_val = value_part.to_lowercase();
+                        let placeholder_values = ["your_token", "your_secret", "your_api_key",
+                            "enter_token", "insert_token", "replace_me", "changeme",
+                            "example_token", "demo_token", "test_token", "sample_token",
+                            "access_token_here", "token_here", "secret_here"];
+                        if placeholder_values.iter().any(|v| lower_val.contains(v)) {
+                            continue;
+                        }
+                    }
+                }
+
+                // Suppress password FPs in environment variables (PWD, OLDPWD are shell builtins)
+                if rule.name == "Generic Password in Code" {
+                    let t = trimmed.to_uppercase();
+                    if t.contains("PWD=") && !t.contains("PASSWORD=") && !t.contains("PASSWD=") {
+                        continue;
+                    }
+                    // Skip documentation/example lines
+                    if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("*") || trimmed.starts_with("<!--") {
+                        continue;
+                    }
+                    // Suppress well-known test/demo/placeholder credential values that are clearly non-sensitive.
+                    // e.g. Plaid sandbox: `self.override_password = 'pass_good'`
+                    let lower_line = line.to_lowercase();
+                    let test_values = ["pass_good", "user_good", "changeme", "password123",
+                        "test1234", "testpass", "demopass", "examplepass", "placeholder",
+                        "your_password", "enter_password", "your-password", "<password>",
+                        "p@ssw0rd", "p@ss123", "securepassword"];
+                    if test_values.iter().any(|v| lower_line.contains(v)) {
+                        continue;
+                    }
+                }
+
+                // Suppress UUIDs found inside URLs (documentation links, not secrets)
+                if rule.name == "Heroku API Key" {
+                    if line.contains("http://") || line.contains("https://") || line.contains("urn:")
+                        || line.contains("msdn.") || line.contains("microsoft.com")
+                        || line.contains("docs.") || line.contains("rfc")
+                        || line.contains("uuid") || line.contains("UUID") {
+                        continue;
                     }
                 }
 

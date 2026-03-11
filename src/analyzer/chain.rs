@@ -192,9 +192,16 @@ impl ChainAnalyzer {
         }
 
         // --- Chain Pattern 4: Deserialization -> RCE ---
+        // Only for languages that actually support gadget chains (Java, C#, Python, PHP, Ruby)
+        // Go/Rust deserialization does NOT enable RCE — skip those.
         for (file, file_findings) in &by_file {
             let deser_findings: Vec<_> = file_findings.iter()
                 .filter(|f| format!("{}", f.category) == "InsecureDeserialization")
+                .filter(|f| {
+                    // Only flag deserialization->RCE chains for languages with actual gadget chains
+                    let ext = f.file_path.rsplit('.').next().unwrap_or("");
+                    matches!(ext, "java" | "kt" | "py" | "rb" | "php" | "cs")
+                })
                 .collect();
 
             for deser in &deser_findings {
@@ -234,7 +241,15 @@ impl ChainAnalyzer {
         }
 
         // --- Chain Pattern 5: Weak Crypto + Hardcoded Secrets ---
-        let has_weak_crypto = findings.iter().any(|f| format!("{}", f.category) == "WeakCrypto");
+        // Only create this chain if both findings are from the same file or closely related
+        // and the weak crypto finding isn't just an MD5 checksum (which is acceptable)
+        let has_weak_crypto = findings.iter().any(|f| {
+            let cat = format!("{}", f.category);
+            cat == "WeakCrypto" && !f.line_content.to_lowercase().contains("checksum")
+                && !f.line_content.to_lowercase().contains("hash")
+                && !f.line_content.to_lowercase().contains("digest")
+                && !f.line_content.to_lowercase().contains("etag")
+        });
         let has_hardcoded = findings.iter().any(|f| format!("{}", f.category) == "HardcodedSecret");
 
         if has_weak_crypto && has_hardcoded {
@@ -563,6 +578,76 @@ impl ChainAnalyzer {
                 impact: "Complete database compromise, credential theft, lateral movement".to_string(),
                 cvss_estimate: 9.9,
             });
+        }
+
+        // --- Chain Pattern 13: Auth Token in Plaintext Logs → Credential Theft ---
+        // Correlates InfoDisclosure findings from mobile/JS log rules with credential theft potential.
+        // adb logcat requires no root — any USB-trusted machine can read Android device logs.
+        for (file, file_findings) in &by_file {
+            let token_log_findings: Vec<_> = file_findings.iter()
+                .filter(|f| {
+                    let cat = format!("{}", f.category);
+                    (cat == "InfoDisclosure" || cat == "Logging")
+                        && (f.rule_id.starts_with("KT-LOG") || f.rule_id.starts_with("MOB-LOG")
+                            || f.rule_id.starts_with("JS-LOG") || f.rule_id.starts_with("MOB-TOAST")
+                            || f.rule_id == "COMP-MOB-001")
+                })
+                .collect();
+
+            for log_f in &token_log_findings {
+                chain_id += 1;
+                let is_android = file.ends_with(".kt") || file.ends_with(".java");
+                let is_ios = file.ends_with(".swift") || file.ends_with(".m") || file.ends_with(".mm");
+                let platform_note = if is_android {
+                    "adb logcat (no root required, works on any USB-trusted machine)"
+                } else if is_ios {
+                    "Console.app on connected Mac or idevicesyslog — log persists across sessions in debug builds"
+                } else {
+                    "browser devtools console or server-side log aggregation"
+                };
+                chains.push(VulnChain {
+                    chain_id: format!("CHAIN-{:04}", chain_id),
+                    title: "Auth Token in Plaintext Logs → Credential Theft".to_string(),
+                    description: format!(
+                        "An OAuth token (public_token/access_token/link_token) is written to system logs in {}. \
+                        The token is readable without any exploit via {}.",
+                        file, platform_note
+                    ),
+                    severity: "MEDIUM".to_string(),
+                    attack_scenario: format!(
+                        "1. Auth token logged at line {} in {}\n\
+                         2. Attacker with physical/USB access reads log via {}\n\
+                         3. Token captured in plaintext without exploit\n\
+                         4. Token replayed against API for unauthorized account-level data access",
+                        log_f.line_number, file, platform_note
+                    ),
+                    steps: vec![
+                        ChainStep {
+                            step_number: 1,
+                            description: "OAuth token written to system log".to_string(),
+                            file_path: file.clone(),
+                            line_number: log_f.line_number,
+                            vuln_type: "InfoDisclosure".to_string(),
+                        },
+                        ChainStep {
+                            step_number: 2,
+                            description: format!("Log read via {}", platform_note),
+                            file_path: file.clone(),
+                            line_number: log_f.line_number,
+                            vuln_type: "LogExfiltration".to_string(),
+                        },
+                        ChainStep {
+                            step_number: 3,
+                            description: "Captured token replayed for unauthorized API access".to_string(),
+                            file_path: file.clone(),
+                            line_number: log_f.line_number,
+                            vuln_type: "CredentialTheft".to_string(),
+                        },
+                    ],
+                    impact: "OAuth token theft enabling read access to linked financial account data (CWE-532)".to_string(),
+                    cvss_estimate: 6.5,
+                });
+            }
         }
 
         // Sort chains by severity

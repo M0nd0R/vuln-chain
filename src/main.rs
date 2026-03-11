@@ -139,7 +139,13 @@ fn main() {
 
     // Terminal report
     if !args.quiet {
-        formatter::print_report(&result);
+        // If JSON/SARIF output is requested, print compact summary only to avoid
+        // flooding the terminal — full details go to the file.
+        if args.output.is_some() || args.sarif.is_some() {
+            formatter::print_summary(&result);
+        } else {
+            formatter::print_report(&result);
+        }
     }
 
     // JSON export

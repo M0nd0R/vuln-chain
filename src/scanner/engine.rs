@@ -292,15 +292,49 @@ impl ScanEngine {
         let ext = file.path.extension()?.to_string_lossy().to_lowercase();
         let path_str = file.path.to_string_lossy().to_string();
 
+        // Skip development tool / test data paths that produce noisy false positives
+        let lower_path = path_str.to_lowercase();
+        if lower_path.contains("/testdata/")
+            || lower_path.contains("/test/")
+            || lower_path.contains("/tests/")
+            || lower_path.contains("_test.go")
+            || lower_path.contains(".test.js")
+            || lower_path.contains(".test.ts")
+            || lower_path.contains(".spec.js")
+            || lower_path.contains(".spec.ts")
+            || lower_path.contains("/examples/")
+            || lower_path.contains("/example/")
+            || lower_path.contains("/fixtures/")
+            || lower_path.contains("/mock/")
+            || lower_path.contains("/mocks/")
+            || lower_path.ends_with("_test.py")
+            || lower_path.contains("/test_")
+        {
+            // Don't skip entirely — but mark as test context (already handled by is_test_file)
+        }
+
+        // Skip minified JS files — client-side code with compressed patterns triggers FPs
+        if lower_path.contains(".min.js") || lower_path.contains(".min.css") || lower_path.contains(".bundle.js") {
+            return None;
+        }
+
         let mut findings = Vec::new();
 
         // Pattern matching
         let lines: Vec<&str> = content.lines().collect();
+
+        // Precompute comment lines to skip (eliminates FPs from code in comments/docs)
+        let is_comment = precompute_comment_lines(&lines);
+
         for compiled in &self.compiled_rules {
             if !compiled.rule.languages.contains(&ext.as_str()) {
                 continue;
             }
             for (i, line) in lines.iter().enumerate() {
+                // Skip comment lines — code patterns in comments are not vulnerabilities
+                if is_comment[i] {
+                    continue;
+                }
                 if let Some(m) = compiled.regex.find(line) {
                     // UAF post-free scope check: only flag if pointer is used after free()
                     if compiled.rule.id == "C-UAF-001" {
@@ -312,6 +346,26 @@ impl ScanEngine {
                                 }
                             }
                         }
+                    }
+
+                    // C-MEM-002: suppress if NULL check follows within 3 lines
+                    if compiled.rule.id == "C-MEM-002" {
+                        let has_null_check = lines[i+1..lines.len().min(i+4)].iter().any(|next_line| {
+                            let t = next_line.trim().to_lowercase();
+                            t.contains("== null") || t.contains("!= null")
+                                || t.contains("== 0") || t.contains("!= 0")
+                                || t.contains("if (") || t.contains("if(")
+                                || t.contains("== nullptr") || t.contains("!= nullptr")
+                        });
+                        if has_null_check {
+                            continue; // Allocation is properly checked — not a vuln
+                        }
+                    }
+
+                    // P7: Defensive code detection — skip if the matched code IS the defense
+                    // e.g. containsDotDot(), sanitizePath(), validateInput() are defenses, not vulns
+                    if is_defensive_code(line, compiled.rule.id) {
+                        continue;
                     }
 
                     let mut hasher = Sha256::new();
@@ -418,4 +472,80 @@ fn is_used_after_free(lines: &[&str], free_line_idx: usize, ptr_name: &str) -> b
     }
 
     false // free() is the last statement for this pointer — not UAF
+}
+
+/// Precompute which lines are comments (single-line or block) to skip during pattern matching.
+/// Returns a Vec<bool> where true means the line is a comment and should be skipped.
+fn precompute_comment_lines(lines: &[&str]) -> Vec<bool> {
+    let mut is_comment = vec![false; lines.len()];
+    let mut in_block = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        if in_block {
+            is_comment[i] = true;
+            if trimmed.contains("*/") {
+                in_block = false;
+            }
+            continue;
+        }
+
+        // Block comment start
+        if trimmed.starts_with("/*") {
+            is_comment[i] = true;
+            if !trimmed.contains("*/") {
+                in_block = true;
+            }
+            continue;
+        }
+
+        // Single-line comments for various languages
+        if trimmed.starts_with("//")   // C, C++, Java, Go, JS, Rust, C#, Swift, Kotlin
+            || trimmed.starts_with('#')  // Python, Ruby, Shell, Perl
+            || trimmed.starts_with("--") // SQL, Haskell, Lua
+            || trimmed.starts_with(";;") // Clojure, Lisp
+        {
+            is_comment[i] = true;
+        }
+    }
+
+    is_comment
+}
+
+/// Detect if a matched line is actually defensive/security code rather than a vulnerability.
+/// For example, a function named `containsDotDot` or `sanitizePath` IS the defense against
+/// path traversal, not a path traversal vulnerability.
+fn is_defensive_code(line: &str, rule_id: &str) -> bool {
+    let lower = line.to_lowercase();
+
+    // Defensive function names that indicate the code IS the security control
+    let defensive_patterns = [
+        "containsdotdot", "sanitize", "validate", "escape", "clean",
+        "filter", "check", "verify", "guard", "protect", "secure",
+        "normalize", "canonicalize", "whitelist", "allowlist", "blocklist",
+        "denylist", "blacklist", "isvalid", "is_valid", "is_safe",
+        "issafe", "isbad", "is_bad",
+    ];
+
+    // If the line defines or is inside a function that IS a security check, skip
+    for pat in &defensive_patterns {
+        if lower.contains(pat) {
+            // Only suppress for rules where defensive code is commonly flagged
+            match rule_id {
+                "GO-PATH-001" | "GO-INJ-001" | "GO-CMD-001" | "GO-SSRF-001"
+                | "GO-TMPL-001" | "GO-REDIR-001"
+                | "C-CMD-001" | "C-FMT-001"
+                | "PHP-INJ-001" | "PHP-INJ-002" | "PHP-XSS-001"
+                | "RB-INJ-001" | "RB-CMD-001"
+                | "JS-FILE-001" | "JS-SSRF-001"
+                | "JAVA-SEC-001" | "JAVA-SEC-002"
+                | "RS-PATH-001" | "RS-CMD-001"
+                | "CS-INJ-001" | "CS-CMD-001" => return true,
+                _ => {}
+            }
+        }
+    }
+
+    false
 }

@@ -728,5 +728,51 @@ fn build_composite_rules() -> Vec<CompositeRule> {
             remediation: "Use SqlParameter: cmd.Parameters.AddWithValue(\"@id\", id)".into(),
             category: "Injection".into(), confidence: "HIGH".into(),
         },
+
+        // === Mobile Auth Token Logging (from Plaid pentest) ===
+        CompositeRule {
+            id: "COMP-MOB-001".into(), name: "Auth Token Logged via Android Log".into(),
+            description: "Android Log call contains a public_token, link_token, or access_token. \
+                Log entries are readable via `adb logcat` by any host-trusted machine without root. \
+                In SDK example code this pattern is used as reference but should never appear in production.".into(),
+            severity: "MEDIUM".into(), cwe: "CWE-532".into(), owasp: "A09:2021".into(),
+            languages: vec!["kt".into(), "java".into()],
+            condition: RuleCondition::And(vec![
+                RuleCondition::Pattern(r"(?i)Log\s*\.\s*[diwev]\s*\(".into()),
+                RuleCondition::Pattern(r"(?i)(?:public[_.]?token|publicToken|link[_.]?token|linkToken|access[_.]?token|accessToken)".into()),
+            ]),
+            remediation: "Remove token from log output. Guard any debug logging with BuildConfig.DEBUG and exclude it from release builds.".into(),
+            category: "InfoDisclosure".into(), confidence: "HIGH".into(),
+        },
+
+        // === localStorage Auth Token Storage (from Plaid my.plaid.com recon) ===
+        CompositeRule {
+            id: "COMP-LOCALSTORAGE-001".into(), name: "Auth Token Stored in localStorage".into(),
+            description: "localStorage.setItem with an auth token key — localStorage persists across sessions \
+                and is readable by all JavaScript on the same origin, including scripts injected via XSS.".into(),
+            severity: "MEDIUM".into(), cwe: "CWE-922".into(), owasp: "A02:2021".into(),
+            languages: vec!["js".into(), "ts".into(), "jsx".into(), "tsx".into()],
+            condition: RuleCondition::And(vec![
+                RuleCondition::Pattern(r"(?i)localStorage\.setItem\s*\(.*(?:token|secret|key|auth|credential|session|link.?token|access.?token)".into()),
+                RuleCondition::Not(Box::new(RuleCondition::Pattern(r"(?i)(?:sessionStorage|httpOnly|cookieStore|secure)".into()))),
+            ]),
+            remediation: "Use sessionStorage for ephemeral tokens, or httpOnly+Secure cookies for auth. Avoid localStorage for any credential in high-security flows.".into(),
+            category: "InsecureStorage".into(), confidence: "HIGH".into(),
+        },
+
+        // === postMessage Without Origin Check ===
+        CompositeRule {
+            id: "COMP-POSTMSG-001".into(), name: "postMessage Listener Without Origin Validation".into(),
+            description: "addEventListener('message') handler that does not check event.origin allows \
+                any origin to inject messages — enables cross-origin data injection and potential token theft.".into(),
+            severity: "MEDIUM".into(), cwe: "CWE-346".into(), owasp: "A01:2021".into(),
+            languages: vec!["js".into(), "ts".into(), "jsx".into(), "tsx".into()],
+            condition: RuleCondition::And(vec![
+                RuleCondition::Pattern(r#"addEventListener\s*\(\s*['"]message['"]\s*,"#.into()),
+                RuleCondition::Not(Box::new(RuleCondition::Pattern(r"(?i)event\.origin".into()))),
+            ]),
+            remediation: "Always validate origin before processing: if (event.origin !== 'https://trusted.com') return;".into(),
+            category: "AuthorizationBypass".into(), confidence: "MEDIUM".into(),
+        },
     ]
 }

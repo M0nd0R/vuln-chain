@@ -581,5 +581,37 @@ fn build_iac_rules() -> Vec<IacRule> {
             remediation: "Remove --insecure flag, use proper TLS certificates",
             negative_pattern: None,
         },
+
+        // ============== ANDROID MANIFEST ==============
+        IacRule {
+            id: "IAC-ANDROID-001", name: "Android App Links Placeholder Domain",
+            description: "App Links intent-filter uses a placeholder domain — autoVerify will always fail, allowing any app to intercept the intent and capture OAuth redirect data",
+            severity: "HIGH", cwe: "CWE-926",
+            pattern: Regex::new(r#"android:host\s*=\s*["'](?:your\.domain\.com|example\.com|domain\.com|yourapp\.com|your-domain\.com|placeholder\.com|<your[._-]?domain>)"#).unwrap(),
+            file_patterns: &["AndroidManifest.xml", "*.xml"],
+            category: "Android",
+            remediation: "Replace placeholder domain with your verified app domain and host .well-known/assetlinks.json on that domain",
+            negative_pattern: None,
+        },
+        IacRule {
+            id: "IAC-ANDROID-002", name: "Android Backup Enabled",
+            description: "android:allowBackup=true permits ADB backup of app data including stored tokens, cached credentials, and SharedPreferences",
+            severity: "MEDIUM", cwe: "CWE-312",
+            pattern: Regex::new(r#"android:allowBackup\s*=\s*["']true["']"#).unwrap(),
+            file_patterns: &["AndroidManifest.xml"],
+            category: "Android",
+            remediation: "Set android:allowBackup=\"false\", or use android:fullBackupOnly=\"true\" with a backup_rules.xml that excludes sensitive files",
+            negative_pattern: None,
+        },
+        IacRule {
+            id: "IAC-ANDROID-003", name: "Android Cleartext Traffic Permitted",
+            description: "android:usesCleartextTraffic=true allows unencrypted HTTP connections — credentials and tokens transmitted in plaintext are vulnerable to MITM interception",
+            severity: "HIGH", cwe: "CWE-319",
+            pattern: Regex::new(r#"android:usesCleartextTraffic\s*=\s*["']true["']"#).unwrap(),
+            file_patterns: &["AndroidManifest.xml", "network_security_config.xml", "*.xml"],
+            category: "Android",
+            remediation: "Set android:usesCleartextTraffic=\"false\" and enforce HTTPS for all connections",
+            negative_pattern: None,
+        },
     ]
 }

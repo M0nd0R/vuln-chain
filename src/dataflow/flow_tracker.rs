@@ -105,7 +105,7 @@ impl FlowTracker {
             FlowSource { pattern: Regex::new(r#"(\$\w+)\s*=\s*(?:file_get_contents\s*\(\s*['"]php://input|getenv\s*\()"#).unwrap(), source_type: "raw_input", languages: &["php"] },
             // Go
             FlowSource { pattern: Regex::new(r"(\w+)\s*(?::=|=)\s*(?:r\.(?:FormValue|URL\.Query|Body|Header\.Get|PostFormValue|Cookie|PathValue|Context)|c\.(?:Param|Query|PostForm|FormFile|Request))\(").unwrap(), source_type: "http_input", languages: &["go"] },
-            FlowSource { pattern: Regex::new(r"(\w+)\s*(?::=|=)\s*os\.(?:Getenv|Args)").unwrap(), source_type: "env_arg", languages: &["go"] },
+            FlowSource { pattern: Regex::new(r"(\w+)\s*(?::=|=)\s*os\.(?:Getenv|Args)").unwrap(), source_type: "env_arg_local", languages: &["go"] },
             // Ruby
             FlowSource { pattern: Regex::new(r"(\w+)\s*=\s*(?:params\[|request\.(?:body|env|headers|cookies|referer))").unwrap(), source_type: "http_input", languages: &["rb"] },
             // C/C++
@@ -286,6 +286,10 @@ impl FlowTracker {
                             FlowConfidence::Low
                         } else if in_test {
                             FlowConfidence::Low
+                        } else if tsource == "env_arg_local" || tsource == "env_var" || tsource == "cli_arg" || tsource == "env_arg" {
+                            // Environment variables and CLI args are NOT attacker-controlled
+                            // for a running server — downgrade confidence
+                            FlowConfidence::Low
                         } else if (i + 1).saturating_sub(*tline) < 15 {
                             FlowConfidence::High
                         } else {
@@ -296,6 +300,8 @@ impl FlowTracker {
                             "LOW"
                         } else if in_test {
                             "INFO"
+                        } else if tsource == "env_arg_local" || tsource == "env_var" || tsource == "cli_arg" || tsource == "env_arg" {
+                            "LOW"
                         } else {
                             sink.severity
                         };
@@ -367,6 +373,8 @@ impl FlowTracker {
                             FlowConfidence::Low
                         } else if in_test {
                             FlowConfidence::Low
+                        } else if psource == "env_arg_local" || psource == "env_var" || psource == "cli_arg" || psource == "env_arg" {
+                            FlowConfidence::Low
                         } else if (i + 1).saturating_sub(source_line) < 20 {
                             FlowConfidence::High
                         } else {
@@ -377,6 +385,8 @@ impl FlowTracker {
                             "LOW"
                         } else if in_test {
                             "INFO"
+                        } else if psource == "env_arg_local" || psource == "env_var" || psource == "cli_arg" || psource == "env_arg" {
+                            "LOW"
                         } else {
                             sink.severity
                         };

@@ -588,7 +588,7 @@ pub static GO_RULES: &[VulnRule] = &[
         description: "Use of weak crypto algorithms",
         category: VulnCategory::WeakCrypto,
         severity: Severity::Medium,
-        pattern: r#"(?i)(?:md5\.(?:New|Sum)|sha1\.(?:New|Sum)|des\.|rc4\.)"#,
+        pattern: r#"(?:crypto/des|crypto/rc4|crypto/md5|crypto/sha1)\b|(?:\bdes|rc4|md5|sha1)\.(?:New|Sum|NewCipher|NewTripleDES)\b"#,
         languages: &["go"],
         cwe: "CWE-327",
         remediation: "Use sha256, aes-gcm",
@@ -701,14 +701,17 @@ pub static RUBY_RULES: &[VulnRule] = &[
     VulnRule {
         id: "RB-CMD-001",
         name: "Command Injection (Ruby)",
-        description: "User input in system/exec/backtick",
+        description: "User input in system/exec/backtick shell execution",
         category: VulnCategory::CommandInjection,
         severity: Severity::Critical,
-        pattern: r#"(?i)(?:system|exec|`|%x\[|IO\.popen|Open3\.\w+|Kernel\.system)\s*(?:\(?\s*["'].*#\{|.*params|.*request)"#,
+        // FP fix: standalone ` now requires #{ interpolation with user-input variable names.
+        // Previous pattern matched backtick-in-string-literal + class names containing "request"
+        // e.g. `fail "...in \`DashboardUserGetRequest\`..."` → 400+ FPs on generated SDK code.
+        pattern: r#"(?i)(?:(?:system|exec)\s*\(\s*(?:params|request\.\w+|input\b|user_input\b|\$\w+\[|gets\b)|%x\[[^\]]*(?:params|request|input|user|cmd|args)\b|IO\.popen\s*\(.*(?:params\b|request\.\w+|input\b|user\b|args\b)|Open3\.\w+\s*\(.*(?:params\b|request\.\w+|input\b|user\b|args\b)|Kernel\.system\s*\(.*(?:params\b|request\.\w+|input\b|user\b|args\b)|`[^`\n]*#\{[^}]*(?:params|request|input|user|cmd|args|data)\b)"#,
         languages: &["rb"],
         cwe: "CWE-78",
-        remediation: "Use array form of system(): system('cmd', arg1, arg2)",
-        false_positive_hint: "Check if input is user-controlled",
+        remediation: "Use array form: system('cmd', arg1, arg2). Never interpolate user input into shell strings.",
+        false_positive_hint: "Backtick case requires #{ interpolation with user-input variable to fire; call names ending in 'Request' no longer trigger",
     },
     VulnRule {
         id: "RB-DESER-001",
@@ -880,15 +883,18 @@ pub static MOBILE_RULES: &[VulnRule] = &[
     },
     VulnRule {
         id: "KT-LOG-001",
-        name: "Sensitive Data in Logs (Kotlin/Android)",
-        description: "Logging potentially sensitive data",
+        name: "Sensitive Data in Logs (Mobile)",
+        description: "Sensitive auth token or credential logged via Log.d/NSLog/print — visible in system logs, Logcat, Console.app even in release builds",
         category: VulnCategory::InfoDisclosure,
         severity: Severity::Medium,
-        pattern: r#"(?i)(?:Log\.(?:d|i|w|e|v)|println|Timber\.\w+)\s*\(.*(?:password|token|secret|key|credential|ssn|credit.?card|api.?key)"#,
-        languages: &["kt", "kts", "swift"],
+        // Covers: Android Log.d/e/i/w/v, Kotlin println, Timber, iOS NSLog, Swift print/debugPrint
+        // Added: public_token, link_token, access_token, publicToken, linkToken, accessToken (from Plaid pentest)
+        // NSLog writes to system log even in RELEASE builds — visible via Console.app on connected Mac
+        pattern: r#"(?i)(?:Log\.(?:d|i|w|e|v)|println|Timber\.\w+|NSLog|print\b|debugPrint)\s*\(.*(?:password|token|secret|key|credential|ssn|credit.?card|api.?key|public.?token|link.?token|access.?token)"#,
+        languages: &["kt", "kts", "swift", "m", "mm"],
         cwe: "CWE-532",
-        remediation: "Remove sensitive data from log statements",
-        false_positive_hint: "Verify if logs contain real sensitive data",
+        remediation: "Remove all token/credential logging. NSLog writes to system log in release builds — strip logging from production paths.",
+        false_positive_hint: "Verify if logs contain real credentials vs test placeholders",
     },
     VulnRule {
         id: "SWIFT-KEYCHAIN-001",

@@ -391,6 +391,59 @@ pub fn print_report(result: &ScanResult) {
     println!("{}\n", separator.bold().red());
 }
 
+/// Compact summary for when JSON/SARIF output is requested.
+/// Avoids flooding the terminal with hundreds of individual findings.
+pub fn print_summary(result: &ScanResult) {
+    let separator = "═".repeat(90);
+
+    let critical = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::Critical).count();
+    let high = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::High).count();
+    let medium = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::Medium).count();
+    let low = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::Low).count();
+    let info = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::Info).count();
+
+    println!("\n{}", separator.bold().red());
+    println!("  {}", "VulnChain — Scan Summary".bold().red());
+    println!("{}", separator.bold().red());
+    println!("  {} Files scanned:        {}", "├".dimmed(), result.files_scanned.to_string().bold());
+    println!("  {} Lines scanned:        {}", "├".dimmed(), result.lines_scanned.to_string().bold());
+    println!("  {} Code vulnerabilities: {}", "├".dimmed(), result.findings.len().to_string().bold().yellow());
+    println!("  {} Composite rule hits:  {}", "├".dimmed(), result.composite_findings.len().to_string().bold().yellow());
+    println!("  {} Data flow paths:      {}", "├".dimmed(), result.flow_paths.len().to_string().bold().yellow());
+    println!("  {} Secret leaks:         {}", "├".dimmed(), result.secret_findings.len().to_string().bold().red());
+    println!("  {} Dependency issues:    {}", "├".dimmed(), result.dep_findings.len().to_string().bold().yellow());
+    println!("  {} Taint flows:          {}", "├".dimmed(), result.taint_findings.len().to_string().bold().red());
+    println!("  {} IaC/Config issues:    {}", "├".dimmed(), result.iac_findings.len().to_string().bold().yellow());
+    println!("  {} Attack chains:        {}", "╰".dimmed(), result.vuln_chains.len().to_string().bold().red());
+    println!();
+    println!("  {} {} | {} {} | {} {} | {} {} | {} {}",
+        "CRITICAL:".on_red().bold().white(), critical,
+        "HIGH:".on_yellow().bold().black(), high,
+        "MEDIUM:".on_cyan().bold().black(), medium,
+        "LOW:".on_blue().bold().white(), low,
+        "INFO:".dimmed(), info,
+    );
+
+    let total = result.findings.len() + result.secret_findings.len()
+        + result.dep_findings.len() + result.taint_findings.len()
+        + result.composite_findings.len() + result.flow_paths.iter().filter(|f| !f.is_sanitized).count()
+        + result.iac_findings.len();
+    println!("\n{}", separator.bold().red());
+    if total == 0 {
+        println!("  {} No vulnerabilities detected!", "✓".bold().green());
+    } else {
+        println!("  {} Total issues: {} | Chains: {} | Risk: {}",
+            "⚠".bold().red(),
+            total.to_string().bold().red(),
+            result.vuln_chains.len().to_string().bold().yellow(),
+            if critical > 0 { "CRITICAL".red().bold().to_string() }
+            else if high > 0 { "HIGH".yellow().bold().to_string() }
+            else { "MODERATE".cyan().to_string() }
+        );
+    }
+    println!("{}\n", separator.bold().red());
+}
+
 pub fn export_json(result: &ScanResult) -> String {
     let critical = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::Critical).count();
     let high = result.findings.iter().filter(|f| f.severity == crate::patterns::vuln_rules::Severity::High).count();
